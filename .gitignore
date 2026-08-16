@@ -1,0 +1,11 @@
+# 构建产物与运行时数据（build/config.json 含登录 cookie，切勿提交）
+/build/
+
+# 提取的第三方安全 SDK / 签名器（版权原因，需自行获取，见 README「构建依赖」）
+/node_scraper/bdms.js
+/tools/sign_folded.js
+
+# 常规
+node_modules/
+*.log
+.DS_Store
