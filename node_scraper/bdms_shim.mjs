@@ -5,7 +5,15 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 function stubFn() { return undefined; }
 
-export function makeBrowserShim({ cookie = '' } = {}) {
+export function makeBrowserShim({
+  cookie = '',
+  origin = 'https://live.douyin.com',
+  userAgent = UA,
+  hardwareConcurrency = 12,
+  deviceMemory = 32,
+} = {}) {
+  const parsed = new URL(origin);
+  const host = parsed.hostname;
   // ---- canvas 2d context stub（指纹相关，返回固定字符串）----
   function makeCtx2d() {
     const state = { fillStyle: '#000', font: '10px sans-serif', textBaseline: 'alphabetic', globalCompositeOperation: 'source-over' };
@@ -70,9 +78,9 @@ export function makeBrowserShim({ cookie = '' } = {}) {
   const window = {};
 
   const navigator = {
-    userAgent: UA, webdriver: false, platform: 'Win32', language: 'zh-CN', languages: ['zh-CN'],
-    hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0, cookieEnabled: true,
-    appVersion: UA.slice(8), appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko', productSub: '20030107',
+    userAgent, webdriver: false, platform: 'Win32', language: 'zh-CN', languages: ['zh-CN'],
+    hardwareConcurrency, deviceMemory, maxTouchPoints: 0, cookieEnabled: true,
+    appVersion: userAgent.slice(8), appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko', productSub: '20030107',
     vendor: 'Google Inc.', vendorSub: '', onLine: true, doNotTrack: null, pdfViewerEnabled: true,
     plugins: { length: 0, refresh() {} }, mimeTypes: { length: 0 },
     sendBeacon: () => false,
@@ -84,13 +92,13 @@ export function makeBrowserShim({ cookie = '' } = {}) {
   };
 
   const location = {
-    href: 'https://live.douyin.com/', protocol: 'https:', host: 'live.douyin.com', hostname: 'live.douyin.com',
-    port: '', pathname: '/', search: '', hash: '', origin: 'https://live.douyin.com',
+    href: `${origin}/`, protocol: 'https:', host, hostname: host,
+    port: '', pathname: '/', search: '', hash: '', origin,
     assign() {}, replace() {}, reload() {}, ancestorOrigins: { length: 0 },
   };
 
   const document = {
-    cookie, referrer: 'https://live.douyin.com/', title: '', domain: 'live.douyin.com',
+    cookie, referrer: `${origin}/`, title: '', domain: host,
     location, readyState: 'complete', characterSet: 'UTF-8', charset: 'UTF-8', compatMode: 'CSS1Compat',
     documentMode: undefined, hidden: false, visibilityState: 'visible', defaultView: window,
     currentScript: null,
