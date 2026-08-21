@@ -4,6 +4,7 @@ import { mkdirSync, existsSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { getWebSocket } from './websocket.mjs';
 
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36';
@@ -57,6 +58,7 @@ async function waitJson(url, timeoutMs = 20000) {
 }
 
 function createCdp(wsUrl) {
+  const WebSocket = getWebSocket();
   const ws = new WebSocket(wsUrl);
   let nextId = 0;
   const pending = new Map();
@@ -532,10 +534,7 @@ export function startSignServer(port = 5557) {
             parsed.chrome = true;
             return ok(200, JSON.stringify(parsed), 'application/json');
           } catch {
-            _cdp = null;
-            _sessionId = null;
-            _ready = null;
-            return ok(200, JSON.stringify({ ok: false, chrome: false, href: '', title: '' }), 'application/json');
+            return ok(200, JSON.stringify({ ok: false, chrome: true, href: '', title: '', error: 'evaluate failed' }), 'application/json');
           }
         }
         const { cdp, sessionId } = await ensureChrome();

@@ -7,6 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getWebSocket } from './websocket.mjs';
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
@@ -39,7 +40,7 @@ class CdpClient {
   }
 
   async connect() {
-    this.ws = new WebSocket(this.url);
+    this.ws = new (getWebSocket())(this.url);
     await new Promise((resolve, reject) => {
       this.ws.addEventListener('open', resolve, { once: true });
       this.ws.addEventListener('error', reject, { once: true });
