@@ -1,6 +1,6 @@
 // Real-Chrome a_bogus: load www.douyin.com BDMS/webmssdk and read XHR.responseURL.
 import { spawn } from 'node:child_process';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { getWebSocket } from './websocket.mjs';
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36';
 export const ORIGIN = 'https://www.douyin.com';
+export const HOME_URL = `${ORIGIN}/user/self`;
 const DEBUG_PORT = Number(process.env.A_BOGUS_CDP_PORT || 9229);
 const USER_DATA = process.env.A_BOGUS_CHROME_PROFILE || path.join(os.tmpdir(), 'douyin-abogus-chrome');
 
@@ -153,10 +154,43 @@ function createCdp(wsUrl) {
   return { ws, send, opened, lastAweme, setCookieHeader: (v) => { cookieHeader = String(v || ''); } };
 }
 
+function patchJsonFile(file, mutator) {
+  if (!existsSync(file)) return;
+  try {
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    if (!data || typeof data !== 'object') return;
+    mutator(data);
+    writeFileSync(file, JSON.stringify(data));
+  } catch {
+    // profile may be mid-write; leave it
+  }
+}
+
+function markProfileClean() {
+  mkdirSync(path.join(USER_DATA, 'Default'), { recursive: true });
+  patchJsonFile(path.join(USER_DATA, 'Default', 'Preferences'), (data) => {
+    data.profile = data.profile && typeof data.profile === 'object' ? data.profile : {};
+    data.profile.exit_type = 'Normal';
+    data.profile.exited_cleanly = true;
+  });
+  patchJsonFile(path.join(USER_DATA, 'Local State'), (data) => {
+    data.exited_cleanly = true;
+  });
+  for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+    const lock = path.join(USER_DATA, name);
+    try {
+      if (existsSync(lock)) unlinkSync(lock);
+    } catch {
+      // still held by a live Chrome; spawn will reuse or fail clearly
+    }
+  }
+}
+
 function spawnChrome(ua) {
   const exe = chromePath();
   if (!exe) throw new Error('Chrome/Edge not found; set CHROME_PATH');
   mkdirSync(USER_DATA, { recursive: true });
+  markProfileClean();
   const args = [
     `--remote-debugging-port=${DEBUG_PORT}`,
     '--remote-debugging-address=127.0.0.1',
@@ -164,6 +198,8 @@ function spawnChrome(ua) {
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
+    '--hide-crash-restore-bubble',
+    '--disable-session-crashed-bubble',
     '--disable-extensions',
     '--disable-popup-blocking',
     '--disable-background-networking',
@@ -175,14 +211,14 @@ function spawnChrome(ua) {
     '--window-position=0,0',
     `--user-agent=${ua}`,
     '--lang=zh-CN',
-    'about:blank',
+    HOME_URL,
   ];
   const child = spawn(exe, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: 'ignore',
+    detached: true,
     windowsHide: false,
   });
-  child.stderr?.on('data', () => {});
-  child.stdout?.on('data', () => {});
+  child.unref();
   child.on('exit', () => {
     if (_child === child) {
       _child = null;
@@ -198,9 +234,151 @@ const STEALTH = `
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 `;
 
+function landingUrl(raw) {
+  const u = String(raw || '').trim();
+  if (!u || u === ORIGIN || u === `${ORIGIN}/` || /\/(?:jingxuan|recommend)(?:[/?#]|$)/i.test(u)) {
+    return HOME_URL;
+  }
+  return u;
+}
+
+function shouldRetarget(url) {
+  const u = String(url || '');
+  if (!u || !/douyin\.com/i.test(u)) return true;
+  return landingUrl(u) === HOME_URL && !/\/user\/self(?:[/?#]|$)/i.test(u);
+}
+
+function isDeadCdpError(err) {
+  const s = String(err && err.message ? err.message : err);
+  return (
+    s.includes('-32000') ||
+    s.includes('"-3200') ||
+    /cannot find context/i.test(s) ||
+    /context was destroyed/i.test(s) ||
+    /session with given id not found/i.test(s) ||
+    /target closed/i.test(s) ||
+    /inspected target navigated/i.test(s)
+  );
+}
+
+function dropSession() {
+  try {
+    _cdp?.ws?.close?.();
+  } catch {
+    // ignore
+  }
+  _cdp = null;
+  _sessionId = null;
+  _ready = null;
+}
+
+async function waitBdms(cdp, sessionId) {
+  await sleep(800);
+  return cdp.send(
+    'Runtime.evaluate',
+    {
+      expression: `new Promise((resolve, reject) => {
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+          if (window.bdms && typeof window.bdms.init === 'function') {
+            clearInterval(iv);
+            resolve('bdms');
+          } else if (Date.now() - t0 > 28000) {
+            clearInterval(iv);
+            reject(new Error('bdms not ready href=' + location.href));
+          }
+        }, 200);
+      })`,
+      awaitPromise: true,
+    },
+    sessionId,
+  );
+}
+
+async function pingSession(cdp, sessionId) {
+  await cdp.send('Runtime.evaluate', { expression: '1+1', returnByValue: true }, sessionId);
+}
+
+async function readSessionCookies(cdp, sessionId) {
+  try {
+    await cdp.send('Network.enable', {}, sessionId);
+  } catch {
+    // domain may already be on
+  }
+  let cookies = [];
+  try {
+    const all = await cdp.send('Network.getAllCookies', {}, sessionId);
+    cookies = (all.cookies || []).filter((c) => String(c.domain || '').includes('douyin'));
+  } catch {
+    try {
+      const r = await cdp.send('Network.getCookies', { urls: ['https://www.douyin.com/'] }, sessionId);
+      cookies = r.cookies || [];
+    } catch {
+      cookies = [];
+    }
+  }
+  const names = new Set(cookies.map((c) => c.name));
+  return {
+    cookieCount: cookies.length,
+    cookieNames: [...names].slice(0, 40),
+    hasSid:
+      names.has('sessionid') ||
+      names.has('sessionid_ss') ||
+      names.has('sid_guard') ||
+      names.has('sid_tt') ||
+      names.has('sid_ucp_v1'),
+    hasUid: names.has('uid_tt') || names.has('uid_tt_ss'),
+  };
+}
+
+function sessionLoggedIn(state) {
+  if (state.hasSid || state.hasUid || state.loggedIn) return true;
+  return String(state.title || '').includes('的抖音');
+}
+
+async function readLoginState(cdp, sessionId) {
+  let page = {};
+  try {
+    const result = await cdp.send(
+      'Runtime.evaluate',
+      {
+        expression: `JSON.stringify({ href: location.href, title: document.title })`,
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    page = JSON.parse(result.result && result.result.value ? result.result.value : '{}');
+  } catch {
+    page = {};
+  }
+  const cookies = await readSessionCookies(cdp, sessionId);
+  const state = {
+    href: page.href || '',
+    title: page.title || '',
+    cookieCount: cookies.cookieCount,
+    cookieNames: cookies.cookieNames || [],
+    hasSid: cookies.hasSid,
+    hasUid: cookies.hasUid,
+  };
+  state.loggedIn = sessionLoggedIn(state);
+  return state;
+}
+
+function assertLoggedIn(state) {
+  if (sessionLoggedIn(state)) return;
+  throw new Error('抖音未登录：请在专用 Chrome 窗口扫码，登录后再拉取收藏');
+}
+
 async function attachPage(cdp, ua) {
-  const created = await cdp.send('Target.createTarget', { url: 'about:blank' });
-  const targetId = created.targetId;
+  const listed = await cdp.send('Target.getTargets').catch(() => ({ targetInfos: [] }));
+  const pages = (listed.targetInfos || []).filter(
+    (t) => t.type === 'page' && /douyin\.com/i.test(String(t.url || '')),
+  );
+  let targetId = pages[0] && pages[0].targetId;
+  if (!targetId) {
+    const created = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    targetId = created.targetId;
+  }
   const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   const sessionId = attached.sessionId;
   await cdp.send('Page.enable', {}, sessionId);
@@ -230,31 +408,23 @@ async function attachPage(cdp, ua) {
     },
     sessionId,
   );
-  await cdp.send('Page.navigate', { url: `${ORIGIN}/` }, sessionId);
-  await cdp.send(
-    'Runtime.evaluate',
-    {
-      expression: `new Promise((resolve, reject) => {
-        const t0 = Date.now();
-        const iv = setInterval(() => {
-          if (window.bdms && typeof window.bdms.init === 'function') {
-            clearInterval(iv);
-            resolve('bdms');
-          } else if (Date.now() - t0 > 28000) {
-            clearInterval(iv);
-            reject(new Error('bdms not ready href=' + location.href));
-          }
-        }, 200);
-      })`,
-      awaitPromise: true,
-    },
-    sessionId,
-  );
+  const currentUrl = (pages.find((t) => t.targetId === targetId) || {}).url || '';
+  if (shouldRetarget(currentUrl)) {
+    await cdp.send('Page.navigate', { url: HOME_URL }, sessionId);
+  }
+  await waitBdms(cdp, sessionId);
   return sessionId;
 }
 
 export async function ensureChrome(ua = DEFAULT_UA) {
-  if (_cdp && _sessionId) return { cdp: _cdp, sessionId: _sessionId };
+  if (_cdp && _sessionId) {
+    try {
+      await pingSession(_cdp, _sessionId);
+      return { cdp: _cdp, sessionId: _sessionId };
+    } catch {
+      dropSession();
+    }
+  }
   if (_ready) return _ready;
   _ready = (async () => {
     let version;
@@ -281,6 +451,40 @@ export async function ensureChrome(ua = DEFAULT_UA) {
   }
 }
 
+async function attachExisting(cdp) {
+  const listed = await cdp.send('Target.getTargets').catch(() => ({ targetInfos: [] }));
+  const pages = (listed.targetInfos || []).filter((t) => t.type === 'page');
+  const douyin = pages.filter((t) => /douyin\.com/i.test(String(t.url || '')));
+  const target = douyin[0] || pages[0];
+  if (!target) throw new Error('no page target');
+  const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+  const sessionId = attached.sessionId;
+  await cdp.send('Page.enable', {}, sessionId).catch(() => {});
+  await cdp.send('Runtime.enable', {}, sessionId).catch(() => {});
+  await cdp.send('Network.enable', {}, sessionId).catch(() => {});
+  return sessionId;
+}
+
+export async function ensureChromeProbe() {
+  if (_cdp && _sessionId) {
+    try {
+      await pingSession(_cdp, _sessionId);
+      return { cdp: _cdp, sessionId: _sessionId };
+    } catch {
+      dropSession();
+    }
+  }
+  const version = await fetchJson(`http://127.0.0.1:${DEBUG_PORT}/json/version`, 800);
+  const wsUrl = version.webSocketDebuggerUrl;
+  if (!wsUrl) throw new Error('no webSocketDebuggerUrl');
+  const cdp = createCdp(wsUrl);
+  await cdp.opened;
+  const sessionId = await attachExisting(cdp);
+  _cdp = cdp;
+  _sessionId = sessionId;
+  return { cdp, sessionId };
+}
+
 export async function signWithChrome({
   query,
   method = 'GET',
@@ -288,12 +492,13 @@ export async function signWithChrome({
   ua = DEFAULT_UA,
 } = {}) {
   if (!query) throw new Error('empty query');
-  const { cdp, sessionId } = await ensureChrome(ua);
-  const url = `${ORIGIN}${path}?${query}`;
-  const result = await cdp.send(
-    'Runtime.evaluate',
-    {
-      expression: `(async () => {
+  const run = async () => {
+    const { cdp, sessionId } = await ensureChrome(ua);
+    const url = `${ORIGIN}${path}?${query}`;
+    const result = await cdp.send(
+      'Runtime.evaluate',
+      {
+        expression: `(async () => {
         const url = ${JSON.stringify(url)};
         const method = ${JSON.stringify(method)};
         const xhr = new XMLHttpRequest();
@@ -311,18 +516,26 @@ export async function signWithChrome({
         }
         return decodeURIComponent(m[1]);
       })()`,
-      awaitPromise: true,
-      returnByValue: true,
-    },
-    sessionId,
-  );
-  if (result.exceptionDetails) {
-    const d = result.exceptionDetails.exception || result.exceptionDetails;
-    throw new Error(d.description || d.value || JSON.stringify(d));
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    if (result.exceptionDetails) {
+      const d = result.exceptionDetails.exception || result.exceptionDetails;
+      throw new Error(d.description || d.value || JSON.stringify(d));
+    }
+    const sig = result.result && result.result.value;
+    if (!sig) throw new Error('empty a_bogus from Chrome');
+    return sig;
+  };
+  try {
+    return await run();
+  } catch (e) {
+    if (!isDeadCdpError(e)) throw e;
+    dropSession();
+    return await run();
   }
-  const sig = result.result && result.result.value;
-  if (!sig) throw new Error('empty a_bogus from Chrome');
-  return sig;
 }
 
 function parseCookieHeader(cookie) {
@@ -386,7 +599,9 @@ export async function fetchWithChrome({
   body = '',
 } = {}) {
   if (!query) throw new Error('empty query');
+  const run = async () => {
   const { cdp, sessionId } = await ensureChrome(ua);
+  assertLoggedIn(await readLoginState(cdp, sessionId));
   let cookieInfo = { cookieCount: 0, hasSession: false };
   if (cookie) {
     cookieInfo = await applyCookies(cdp, sessionId, cookie);
@@ -490,6 +705,14 @@ export async function fetchWithChrome({
     delete out.body;
   }
   return out;
+  };
+  try {
+    return await run();
+  } catch (e) {
+    if (!isDeadCdpError(e)) throw e;
+    dropSession();
+    return await run();
+  }
 }
 
 export function startSignServer(port = 5557) {
@@ -505,40 +728,24 @@ export function startSignServer(port = 5557) {
     if (req.method === 'GET' && url.pathname === '/page') {
       const spawn = url.searchParams.get('spawn') !== '0';
       const readPage = async (cdp, sessionId) => {
-        const result = await cdp.send(
-          'Runtime.evaluate',
-          {
-            expression: `JSON.stringify({
-              href: location.href,
-              title: document.title,
-              cookieLen: document.cookie.length,
-              hasSid: /(?:^|;\\s*)sessionid=/.test(document.cookie),
-              hasUid: /(?:^|;\\s*)uid_tt=/.test(document.cookie),
-              loginText: /登录|登入|Log in/i.test(document.body ? document.body.innerText.slice(0, 4000) : ''),
-            })`,
-            returnByValue: true,
-          },
-          sessionId,
-        );
-        return result.result && result.result.value ? result.result.value : '{}';
+        const state = await readLoginState(cdp, sessionId);
+        return JSON.stringify(state);
       };
       try {
         if (!spawn) {
-          if (!_cdp || !_sessionId) {
-            return ok(200, JSON.stringify({ ok: false, chrome: false, href: '', title: '' }), 'application/json');
-          }
           try {
-            const raw = await readPage(_cdp, _sessionId);
+            const { cdp, sessionId } = await ensureChromeProbe();
+            const raw = await readPage(cdp, sessionId);
             const parsed = JSON.parse(raw);
             parsed.ok = true;
             parsed.chrome = true;
             return ok(200, JSON.stringify(parsed), 'application/json');
           } catch {
-            return ok(200, JSON.stringify({ ok: false, chrome: true, href: '', title: '', error: 'evaluate failed' }), 'application/json');
+            return ok(200, JSON.stringify({ ok: false, chrome: false, href: '', title: '' }), 'application/json');
           }
         }
         const { cdp, sessionId } = await ensureChrome();
-        const goto = url.searchParams.get('goto') || '';
+        const goto = landingUrl(url.searchParams.get('goto') || HOME_URL);
         if (url.searchParams.get('clear') === '1') {
           try {
             await cdp.send('Network.enable', {}, sessionId);
