@@ -299,7 +299,7 @@ async function pingSession(cdp, sessionId) {
   await cdp.send('Runtime.evaluate', { expression: '1+1', returnByValue: true }, sessionId);
 }
 
-async function readSessionCookies(cdp, sessionId) {
+async function listDouyinCookies(cdp, sessionId) {
   try {
     await cdp.send('Network.enable', {}, sessionId);
   } catch {
@@ -317,8 +317,18 @@ async function readSessionCookies(cdp, sessionId) {
       cookies = [];
     }
   }
+  return cookies;
+}
+
+function cookieMeta(cookies) {
   const names = new Set(cookies.map((c) => c.name));
+  const header = cookies
+    .filter((c) => c && c.name)
+    .map((c) => `${c.name}=${c.value == null ? '' : c.value}`)
+    .join('; ');
   return {
+    cookie: header,
+    cookieLen: header.length,
     cookieCount: cookies.length,
     cookieNames: [...names].slice(0, 40),
     hasSid:
@@ -329,6 +339,22 @@ async function readSessionCookies(cdp, sessionId) {
       names.has('sid_ucp_v1'),
     hasUid: names.has('uid_tt') || names.has('uid_tt_ss'),
   };
+}
+
+async function readSessionCookies(cdp, sessionId) {
+  const cookies = await listDouyinCookies(cdp, sessionId);
+  const meta = cookieMeta(cookies);
+  return {
+    cookieCount: meta.cookieCount,
+    cookieNames: meta.cookieNames,
+    hasSid: meta.hasSid,
+    hasUid: meta.hasUid,
+  };
+}
+
+async function exportDouyinCookieHeader(cdp, sessionId) {
+  const cookies = await listDouyinCookies(cdp, sessionId);
+  return cookieMeta(cookies);
 }
 
 function sessionLoggedIn(state) {
@@ -769,6 +795,61 @@ export function startSignServer(port = 5557) {
         return ok(200, JSON.stringify(parsed), 'application/json');
       } catch (e) {
         return ok(500, String(e && e.message ? e.message : e));
+      }
+    }
+    if (req.method === 'GET' && url.pathname === '/cookie') {
+      // Export douyin.com cookies from dedicated Chrome for TikTokDownloader (5555).
+      const spawn = url.searchParams.get('spawn') !== '0';
+      try {
+        const { cdp, sessionId } = spawn ? await ensureChrome() : await ensureChromeProbe();
+        const meta = await exportDouyinCookieHeader(cdp, sessionId);
+        const loggedIn = Boolean(meta.hasSid || meta.hasUid);
+        if (!meta.cookie || !loggedIn) {
+          return ok(
+            200,
+            JSON.stringify({
+              ok: false,
+              chrome: true,
+              loggedIn: false,
+              error: '抖音未登录或 Cookie 为空：请在专用 Chrome 扫码后再同步',
+              cookie: '',
+              cookieLen: 0,
+              cookieCount: meta.cookieCount,
+              hasSid: meta.hasSid,
+              hasUid: meta.hasUid,
+              cookieNames: meta.cookieNames,
+            }),
+            'application/json',
+          );
+        }
+        return ok(
+          200,
+          JSON.stringify({
+            ok: true,
+            chrome: true,
+            loggedIn: true,
+            cookie: meta.cookie,
+            cookieLen: meta.cookieLen,
+            cookieCount: meta.cookieCount,
+            hasSid: meta.hasSid,
+            hasUid: meta.hasUid,
+            cookieNames: meta.cookieNames,
+          }),
+          'application/json',
+        );
+      } catch (e) {
+        return ok(
+          200,
+          JSON.stringify({
+            ok: false,
+            chrome: false,
+            loggedIn: false,
+            error: String(e && e.message ? e.message : e),
+            cookie: '',
+            cookieLen: 0,
+          }),
+          'application/json',
+        );
       }
     }
     if (req.method !== 'POST' || (url.pathname !== '/sign' && url.pathname !== '/fetch')) {
