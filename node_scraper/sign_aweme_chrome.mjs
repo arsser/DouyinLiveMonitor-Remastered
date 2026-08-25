@@ -125,7 +125,6 @@ async function ensureChrome({ ua = DEFAULT_UA, headless = true } = {}) {
     `--user-data-dir=${PROFILE_DIR}`,
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
     '--disable-features=Translate,OptimizationHints,MediaRouter',
     '--disable-popup-blocking',
     '--window-size=1920,1080',

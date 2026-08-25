@@ -206,7 +206,6 @@ function spawnChrome(ua) {
     '--disable-sync',
     '--disable-translate',
     '--disable-component-update',
-    '--disable-blink-features=AutomationControlled',
     '--window-size=1920,1080',
     '--window-position=0,0',
     `--user-agent=${ua}`,
@@ -251,6 +250,7 @@ function shouldRetarget(url) {
 function isDeadCdpError(err) {
   const s = String(err && err.message ? err.message : err);
   return (
+    /CDP timeout/i.test(s) ||
     s.includes('-32000') ||
     s.includes('"-3200') ||
     /cannot find context/i.test(s) ||
@@ -503,9 +503,11 @@ export async function signWithChrome({
         const method = ${JSON.stringify(method)};
         const xhr = new XMLHttpRequest();
         xhr.open(method, url, true);
+        xhr.timeout = 20000;
         await new Promise((resolve) => {
           xhr.onloadend = resolve;
           xhr.onerror = resolve;
+          xhr.ontimeout = resolve;
           try { xhr.send(method === 'POST' ? 'count=10&cursor=0' : null); }
           catch { resolve(); }
         });
@@ -642,6 +644,7 @@ export async function fetchWithChrome({
         };
         const xhr = new XMLHttpRequest();
         xhr.withCredentials = true;
+        xhr.timeout = 20000;
         xhr.open(method, url, true);
         if (method === 'POST') {
           xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -649,6 +652,7 @@ export async function fetchWithChrome({
         await new Promise((resolve) => {
           xhr.onloadend = resolve;
           xhr.onerror = resolve;
+          xhr.ontimeout = resolve;
           try { xhr.send(method === 'POST' ? sendBody : null); }
           catch { resolve(); }
         });
