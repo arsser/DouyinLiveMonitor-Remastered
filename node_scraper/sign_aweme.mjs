@@ -31,15 +31,23 @@ let _ready = null;
 let _lock = Promise.resolve();
 
 function parseArgs(argv) {
-  const out = { query: '', method: 'GET', ua: DEFAULT_UA, path: '/aweme/v1/web/collects/list/', serve: 0 };
+  const out = { query: '', method: 'GET', ua: DEFAULT_UA, path: '/aweme/v1/web/collects/list/', serve: 0, jsonFile: '' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--query') out.query = argv[++i] || '';
+    else if (a === '--json-file') out.jsonFile = argv[++i] || '';
     else if (a === '--method') out.method = (argv[++i] || 'GET').toUpperCase();
     else if (a === '--ua') out.ua = argv[++i] || DEFAULT_UA;
     else if (a === '--path') out.path = argv[++i] || out.path;
     else if (a === '--serve') out.serve = Number(argv[++i] || 5557) || 5557;
     else if (!a.startsWith('--') && !out.query) out.query = a;
+  }
+  if (out.jsonFile) {
+    const body = JSON.parse(readFileSync(out.jsonFile, 'utf8'));
+    out.query = String(body.query || out.query || '');
+    if (body.method) out.method = String(body.method).toUpperCase();
+    if (body.ua) out.ua = String(body.ua);
+    if (body.path) out.path = String(body.path);
   }
   return out;
 }
@@ -140,6 +148,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     startSignServer(args.serve);
   } else if (!args.query) {
     console.error('usage: node sign_aweme.mjs --query "<qs>" [--method GET] [--path /aweme/v1/web/collects/list/]');
+    console.error('   or: node sign_aweme.mjs --json-file <file.json>');
     console.error('   or: node sign_aweme.mjs --serve 5557');
     process.exit(2);
   } else {
